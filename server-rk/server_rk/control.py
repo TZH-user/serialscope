@@ -11,6 +11,7 @@
     ping / status / hello / pair
     video_start / video_stop / video_params
     input
+    sys_stats（板端 1Hz 系统状态：CPU/内存/eMMC/温度/负载，PC 轮询；差值字段首次缺省）
     serial_open / serial_write / serial_read
     close（回 ok 后服务端主动断开）
 """
@@ -23,6 +24,7 @@ import time
 from dataclasses import dataclass
 
 from . import SERVER_VERSION
+from . import sys_stats
 from .protocol import (PairingSession, decode_line, encode_msg, error_resp,
                        load_pairing_code, ok_resp)
 
@@ -123,6 +125,11 @@ def _h_input(ctx: ControlContext, req: dict) -> dict:
     return ok_resp(applied=applied, skipped=skipped)
 
 
+def _h_sys_stats(ctx: ControlContext, req: dict) -> dict:
+    # Linux 页 1Hz 轮询系统状态；CPU%/eMMC IO 速率按上次采样差值（首次缺省，PC 端容缺键）
+    return ok_resp(stats=sys_stats.sample())
+
+
 def _h_serial_open(ctx: ControlContext, req: dict) -> dict:
     url = req.get("url") or req.get("port")
     if not url:
@@ -167,6 +174,7 @@ COMMANDS = {
     "video_stop": _h_video_stop,
     "video_params": _h_video_params,
     "input": _h_input,
+    "sys_stats": _h_sys_stats,
     "serial_open": _h_serial_open,
     "serial_write": _h_serial_write,
     "serial_read": _h_serial_read,

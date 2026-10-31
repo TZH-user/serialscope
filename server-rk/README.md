@@ -22,9 +22,10 @@
 | 模块 | 职责 |
 |---|---|
 | protocol | 行协议编解码（一行请求一行响应，错误统一 `{"ok":false,"error":…}`）、配对状态机（challenge 绑定 + 配对码明文比对，M3 换 PSK 派生）、未配对门禁 |
-| control | TCP 9201 服务、命令分发表（ping/status/hello/pair/video_*/input/serial_*/close）、`Deps` 依赖注入容器（video/injector/serial 均可换 fake 单测） |
+| control | TCP 9201 服务、命令分发表（ping/status/hello/pair/video_*/input/**sys_stats**/serial_*/close）、`Deps` 依赖注入容器（video/injector/serial 均可换 fake 单测） |
 | video | `FFmpegVideoSource` 只管命令行构造与子进程生命周期（kmsgrab→nv12→h264_rkmpp 无 B 帧→udp，§5.3）；`packetize` 按 `[seq u32][ts_ms u32][flags u8]` 切包，PC 端 H264UdpSource 须对称实现 |
 | input_inject | Qt.Key_* → Linux input 事件码映射 + 批注入（key/mouse_move/**mouse_abs**/mouse_button/wheel）；鼠标绝对定位走 X 指针子进程（本板 libX11 非主线程 warp 必段错误——专用子进程主线程持 X 连接，管道喂坐标）；键盘/滚轮/点击走 uinput（零依赖 raw ioctl，python-uinput 缺失时自动兜底，需 root+/dev/uinput）；全不可用记日志不抛异常。板屏量程可用 SERVER_RK_SCREEN=WxH 覆盖（默认 1024x600） |
+| sys_stats | 板端 1Hz 系统状态采样（纯读 /proc 与 /sys，零外部依赖）：CPU%（/proc/stat 差值）、内存、eMMC 容量与 I/O 速率（根分区所在 mmcblk，速率按采样差值）、thermal_zone 最高温、负载、运行时长；差值字段首拍缺省，PC 端容缺键渲染 -- |
 | serial_bridge | 控制通道 serial_open/write/read → `serial_for_url` 单口占用透传，重开即换口/换波特率 |
 
 ### 真板部署（RK356x，含视频链自适应）

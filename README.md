@@ -121,7 +121,7 @@ python -m PyInstaller --noconfirm --onefile --windowed --paths qt --name LiuScop
 
 RK3562 推荐先试 `1500000 / 8 / None / One / None`；板子按协议发数据即可看到曲线，波形页「格式说明」有三种协议的帧格式与单片机示例代码。
 
-**离屏自测**（无需显示器/串口，68 组断言）：
+**离屏自测**（无需显示器/串口，71 组断言）：
 
 ```powershell
 python qt/selftest.py
@@ -140,7 +140,7 @@ python qt/selftest.py
 ## 🧪 自检与测试
 
 ```powershell
-# 离屏自测（68 组：协议/终端/热插拔/查找/录制/控制通道/headless/波形/频谱/Modbus/
+# 离屏自测（71 组：协议/终端/热插拔/查找/录制/控制通道/headless/波形/频谱/Modbus/
 # 更新/主题/STM32 假 CLI/AI 通道扩展/ESP32 连接层与日志层/ANSI 渲染/八页签集成……）
 python qt/selftest.py
 ```
@@ -150,7 +150,7 @@ python qt/selftest.py
 ```
 LiuScope/
   qt/                      ★ Qt 主线（v1.2.0）：core（纯逻辑）/ ui（分层窗体）/
-                           selftest.py（离屏自测 68 组）/ headless_main.py（无头管线）
+                           selftest.py（离屏自测 71 组）/ headless_main.py（无头管线）
   docs/                    screenshots/ 截图
   AI_INTERFACE.md          AI 控制通道 + 无头模式接入指南（命令表与 help 同源）
   qt/README_QT.md          Qt 主线里程碑（M1~M5 与 v1.2.0 收口）

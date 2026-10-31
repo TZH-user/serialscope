@@ -798,6 +798,49 @@ class _ListHandler(logging.Handler):
         self.sink.append(record)
 
 
+# ---------- sys_stats ----------
+
+def test_sys_stats():
+    """纯解析口径 + 采样容错（Windows 无 /proc：sample() 必须安全返回稀疏 dict）+ 分发接入。"""
+    from server_rk import sys_stats as S
+
+    assert S._cpu_times("cpu  100 0 100 700 100 0 0 0 0 0") == (1000, 800)
+    assert S.cpu_usage_percent((1000, 800), (500, 400)) == 20.0   # 忙 100/500 → 20%
+    assert S.cpu_usage_percent((1000, 800), None) is None
+    assert S.cpu_usage_percent((1000, 800), (1000, 800)) is None  # 无增量
+    total_mb, used_mb = S.parse_meminfo(
+        "MemTotal:       2048000 kB\nMemFree: 100 kB\nMemAvailable:  1024000 kB\n")
+    assert abs(total_mb - 2000.0) < 0.1 and abs(used_mb - 1000.0) < 0.1, (total_mb, used_mb)
+    assert S.parse_diskstat(" 1234 0 5678 0 4321 0 8765 0 0 0 0") == (5678, 8765)
+    assert S.parse_diskstat("short line") is None
+    assert S._root_disk_from_mounts(
+        "/dev/mmcblk1p2 / ext4 rw 0 0\n/dev/mmcblk0p1 /boot vfat rw 0 0") == "mmcblk1"
+    assert S._root_disk_from_mounts("tmpfs / tmpfs rw 0 0") is None
+
+    stats = S.sample()   # Windows：无 /proc、/sys，必须稀疏且不抛
+    assert isinstance(stats, dict) and all(
+        k in {"cpu_cores", "cpu_percent", "mem_total_mb", "mem_used_mb",
+              "disk_total_gb", "disk_free_gb", "disk_dev", "disk_size_gb",
+              "disk_read_mb", "disk_write_mb", "disk_read_kbps", "disk_write_kbps",
+              "temp_c", "uptime_s", "load1"} for k in stats)
+
+    # 分发接入：未配对拒绝；配对后返回 ok + stats dict
+    from server_rk import control as C
+    from server_rk.protocol import PairingSession
+
+    deps = _make_deps()
+    s = PairingSession(code="135790")
+    r = C.handle_line(deps, s, "192.0.2.9", '{"cmd":"sys_stats"}')
+    assert r[0] == {"ok": False, "error": "未配对"}
+    r1 = C.handle_line(deps, s, "192.0.2.9", '{"cmd":"hello"}')
+    r2 = C.handle_line(deps, s, "192.0.2.9", json.dumps(
+        {"cmd": "pair", "code": "135790", "challenge": r1[0]["challenge"]}))
+    assert r2[0]["ok"]
+    r3 = C.handle_line(deps, s, "192.0.2.9", '{"cmd":"sys_stats"}')
+    assert r3[0]["ok"] and isinstance(r3[0].get("stats"), dict)
+    print("SYS STATS OK")
+
+
 # ---------- 入口 ----------
 
 def run_tests() -> int:
@@ -817,6 +860,7 @@ def run_tests() -> int:
     test_serial_bridge()
     test_input_inject_mapping()
     test_input_inject_degraded()
+    test_sys_stats()
     print("SERVER-RK TESTS OK")
     return 0
 

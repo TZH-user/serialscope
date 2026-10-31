@@ -694,6 +694,54 @@ class ControlClient(QtCore.QThread):
             self.report.emit(f'控制通道不可达（板端 server_rk 没在跑？）: {exc}', 'status_err')
 
 
+class SysStatsPoller(QtCore.QThread):
+    """板端系统状态 1Hz 轮询线程：独立于发流的 ControlClient（不看画面也能看状态）。
+
+    连接 → 配对 → 循环 sys_stats（服务端 handler 见 server_rk/sys_stats.py，差值
+    字段首次缺省）；断线退避 3s 重连。sample(dict) 每次采样发给 UI，report(文本,
+    级别) 汇报连接状态。connect_fn 可注入（自测走 socketpair 假服务端，不碰真网）。
+    """
+
+    sample = QtCore.Signal(dict)
+    report = QtCore.Signal(str, str)
+
+    RETRY_DELAY_S = 3.0
+
+    def __init__(self, host: str, control_port: int, code: str,
+                 connect_fn=None, parent=None):
+        super().__init__(parent)
+        self.host = host
+        self.control_port = int(control_port)
+        self.code = code
+        self._connect_fn = connect_fn or (
+            lambda hp, timeout: socket.create_connection(hp, timeout=timeout))
+        self._stop_evt = threading.Event()
+
+    def request_stop(self):
+        self._stop_evt.set()
+
+    def run(self):
+        while not self._stop_evt.is_set():
+            try:
+                with self._connect_fn((self.host, self.control_port), 3.0) as sock:
+                    hello = ControlClient._ask(sock, {'cmd': 'hello', 'v': 1,
+                                                      'nonce': secrets.token_hex(8)})
+                    ControlClient._ask(sock, {'cmd': 'pair', 'code': self.code,
+                                              'challenge': hello.get('challenge', '')})
+                    self.report.emit('系统状态：已连接（1Hz）', 'status_ok')
+                    while not self._stop_evt.is_set():
+                        resp = ControlClient._ask(sock, {'cmd': 'sys_stats'}, timeout=3.0)
+                        self.sample.emit(resp.get('stats') or {})
+                        if self._stop_evt.wait(1.0):    # 分片节拍，停止即刻生效
+                            break
+            except (ControlError, OSError, ValueError) as exc:
+                if self._stop_evt.is_set():
+                    break
+                self.report.emit(f'系统状态: {exc}', 'status_warn')
+                if self._stop_evt.wait(self.RETRY_DELAY_S):
+                    break
+
+
 class DeviceScreenPage(QtWidgets.QWidget):
     """「Linux 支持」页：工具行（开始/停止 + UDP 端口 + 状态）+ 渲染区 + 统计行。
 
@@ -758,6 +806,12 @@ class DeviceScreenPage(QtWidgets.QWidget):
                                   '（绝对坐标跟手；画面里的板端光标会跟着走）。\n'
                                   '需要板端 server_rk 以 root 运行（/dev/uinput）')
         self.chk_mouse.toggled.connect(self._on_mouse_ctl)
+        # 系统状态（1Hz 轮询板端 sys_stats）：独立小连接，不看画面也能看板况
+        self.chk_sys = QtWidgets.QCheckBox('系统状态')
+        self.chk_sys.setChecked(read_setting('linux/sys_stats', '1') in ('1', 'true', 'yes'))
+        self.chk_sys.setToolTip('1Hz 轮询板端 CPU/内存/eMMC/温度/负载/运行时长。\n'
+                                '独立于发流的小连接；板端需 server_rk 在跑')
+        self.chk_sys.toggled.connect(self._on_sys_stats_toggled)
         self.lbl_status = QtWidgets.QLabel('空闲')
         self.lbl_status.setObjectName('status_err')
         self.lbl_status.setToolTip('M2 原型：只读播放；M3 加键鼠交互与延迟 overlay')
@@ -797,16 +851,46 @@ class DeviceScreenPage(QtWidgets.QWidget):
         stats.addWidget(self.lbl_delay)
         stats.addStretch(1)
 
+        # ---- 系统状态行（勾选「系统状态」后 1Hz 刷新）----
+        self.lbl_cpu = QtWidgets.QLabel('CPU --%')
+        self.lbl_mem = QtWidgets.QLabel('内存 --/-- MB')
+        self.lbl_emmc = QtWidgets.QLabel('eMMC --')
+        self.lbl_temp = QtWidgets.QLabel('温度 --℃')
+        self.lbl_load = QtWidgets.QLabel('负载 --')
+        self.lbl_up = QtWidgets.QLabel('运行 --')
+        for lbl in (self.lbl_cpu, self.lbl_mem, self.lbl_emmc,
+                    self.lbl_temp, self.lbl_load, self.lbl_up):
+            lbl.setObjectName('backlog')
+        sysrow = QtWidgets.QHBoxLayout()
+        sysrow.addWidget(self.chk_sys)
+        sysrow.addWidget(self.lbl_cpu)
+        sysrow.addWidget(self.lbl_mem)
+        sysrow.addWidget(self.lbl_emmc)
+        sysrow.addWidget(self.lbl_temp)
+        sysrow.addWidget(self.lbl_load)
+        sysrow.addWidget(self.lbl_up)
+        sysrow.addStretch(1)
+
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
         lay.addLayout(tool)
         lay.addWidget(self.gl_widget, 1)
         lay.addLayout(stats)
+        lay.addLayout(sysrow)
 
         self._stats_timer = QtCore.QTimer(self)
         self._stats_timer.timeout.connect(self._update_stats)
         self.gl_widget.inject_cb = self._send_inject
+
+        # 系统状态轮询：按设置自启（离屏自测环境不自动起真网线程；自测经
+        # _start_sys_poller 显式注入假服务端）；板 IP/控制口/配对码改动即重连
+        self._sys_poller: SysStatsPoller | None = None
+        self.edit_host.editingFinished.connect(self._restart_sys_poller)
+        self.spin_control.editingFinished.connect(self._restart_sys_poller)
+        self.edit_code.editingFinished.connect(self._restart_sys_poller)
+        if self.chk_sys.isChecked():
+            self._on_sys_stats_toggled(True)
 
         # 主题联动：贴现有页面写法（启动同步一次 + set_theme 通知刷新）
         self.apply_theme()
@@ -883,6 +967,60 @@ class DeviceScreenPage(QtWidgets.QWidget):
         if ctl is not None:
             ctl.send_command({'cmd': 'input', 'events': events})
 
+    # ---------- 系统状态轮询 ----------
+
+    def _on_sys_stats_toggled(self, on: bool):
+        write_setting('linux/sys_stats', '1' if on else '0')
+        if on:
+            # 离屏自测环境不起真网线程（自测经 _start_sys_poller 显式注入假服务端）
+            if QtWidgets.QApplication.instance().platformName() != 'offscreen':
+                self._start_sys_poller()
+        else:
+            self._stop_sys_poller()
+
+    def _start_sys_poller(self, connect_fn=None):
+        self._stop_sys_poller()
+        host = self.edit_host.text().strip()
+        if not host:
+            return
+        poller = SysStatsPoller(host, self.spin_control.value(),
+                                self.edit_code.text().strip(),
+                                connect_fn=connect_fn, parent=self)
+        poller.sample.connect(self._on_sys_sample)
+        poller.report.connect(self._set_status)
+        self._sys_poller = poller
+        poller.start()
+
+    def _stop_sys_poller(self):
+        poller, self._sys_poller = self._sys_poller, None
+        if poller is not None:
+            poller.request_stop()
+            poller.wait(4000)       # 覆盖 sys_stats 3s 问答超时的最坏收尾
+
+    def _restart_sys_poller(self):
+        if self.chk_sys.isChecked():
+            self._start_sys_poller()
+
+    def _on_sys_sample(self, stats: dict):
+        """板端 1Hz 采样上屏；缺键（首拍差值/半行）渲染成 --，不猜值。"""
+        cpu = stats.get('cpu_percent')
+        self.lbl_cpu.setText('CPU --%' if cpu is None else f'CPU {cpu:.0f}%')
+        mem_t, mem_u = stats.get('mem_total_mb'), stats.get('mem_used_mb')
+        self.lbl_mem.setText('--/-- MB' if mem_t is None or mem_u is None
+                             else f'内存 {mem_u:.0f}/{mem_t:.0f} MB')
+        dt, df = stats.get('disk_total_gb'), stats.get('disk_free_gb')
+        used = dt - df if (dt is not None and df is not None) else None
+        dev = stats.get('disk_dev', '')
+        self.lbl_emmc.setText('eMMC --' if used is None
+                              else f'eMMC {used:.1f}/{dt:.1f} GB' + (f'·{dev}' if dev else ''))
+        temp = stats.get('temp_c')
+        self.lbl_temp.setText('温度 --℃' if temp is None else f'温度 {temp:.0f}℃')
+        load = stats.get('load1')
+        self.lbl_load.setText('负载 --' if load is None else f'负载 {load:.2f}')
+        up = stats.get('uptime_s')
+        self.lbl_up.setText('运行 --' if up is None
+                            else f'运行 {up // 86400}天{up % 86400 // 3600:02d}:{up % 3600 // 60:02d}')
+
     def _stop_pipeline(self):
         self._stats_timer.stop()
         if self.control is not None:
@@ -910,6 +1048,7 @@ class DeviceScreenPage(QtWidgets.QWidget):
         """主窗关闭时的收尾（幂等，未启动时为空操作）。"""
         if self.source is not None or self._decode_thread is not None:
             self._stop_pipeline()
+        self._stop_sys_poller()
 
     # ---------- 信号槽 ----------
 

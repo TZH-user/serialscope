@@ -42,12 +42,17 @@ class Stm32Panel(QtWidgets.QWidget):
         self._busy_text = ''
 
         # ---- 状态区 ----
+        # 状态标签统一 wordWrap：CLI 路径/报错可能很长，窄窗换行显示而非被裁
+        # （layout_audit 实测：无换行时长路径随窗口缩窄直接截断丢失尾部）
         self.lbl_cli = QtWidgets.QLabel('CLI: 探测中…')
         self.lbl_cli.setObjectName('backlog')
+        self.lbl_cli.setWordWrap(True)
         self.lbl_probe = QtWidgets.QLabel('ST-LINK: 未探测（点「刷新」探测）')
         self.lbl_probe.setObjectName('backlog')
+        self.lbl_probe.setWordWrap(True)
         self.lbl_target = QtWidgets.QLabel('目标: 未连接')
         self.lbl_target.setObjectName('backlog')
+        self.lbl_target.setWordWrap(True)
         self.info_box = QtWidgets.QPlainTextEdit()
         self.info_box.setReadOnly(True)
         self.info_box.setMaximumBlockCount(200)
@@ -100,6 +105,7 @@ class Stm32Panel(QtWidgets.QWidget):
         self.btn_pick.clicked.connect(self.pick_file)
         self.lbl_file = QtWidgets.QLabel('未选择固件文件')
         self.lbl_file.setObjectName('backlog')
+        self.lbl_file.setWordWrap(True)   # 固件路径长，窄窗换行而非被裁
         self.edit_addr = QtWidgets.QLineEdit(BIN_BASE_ADDR_DEFAULT)
         self.edit_addr.setToolTip('bin 烧录基址（hex 文件自带地址，忽略此框）；支持 0x 前缀或十进制')
         self.edit_addr.setMaximumWidth(120)
@@ -134,6 +140,7 @@ class Stm32Panel(QtWidgets.QWidget):
 
         self.lbl_busy = QtWidgets.QLabel('空闲')
         self.lbl_busy.setObjectName('backlog')
+        self.lbl_busy.setWordWrap(True)   # 忙碌文案带文件名，窄窗换行而非被裁
 
         op_box = QtWidgets.QVBoxLayout()
         op_box.addLayout(op_row)

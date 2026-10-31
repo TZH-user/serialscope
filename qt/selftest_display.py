@@ -588,10 +588,97 @@ def test_screen_overlay_controls():
     print('SCREEN OVERLAY CONTROLS OK')
 
 
+def test_sys_stats_panel():
+    """系统状态 1Hz 轮询：假服务端喂两拍（首拍差值缺省→次拍全键），页标签正确渲染。
+
+    轮询线程走 socketpair 假服务端（不碰真网）；页标签对缺键渲染 '--'，
+    满键渲染真实值（数值口径与 server_rk/sys_stats.py 真机采样一致）。
+    """
+    import json as _json
+    import socket as _socket
+    import threading as _threading
+
+    from PySide6 import QtWidgets
+
+    from ui.device_screen import DeviceScreenPage, SysStatsPoller
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+
+    # ---- 假服务端：socketpair，hello→pair→两拍 sys_stats ----
+    csock, ssock = _socket.socketpair()
+    srv_done = _threading.Event()
+
+    def serve():
+        try:
+            f = ssock.makefile('rwb')
+            expect = iter([{'stats': {}},           # 首拍：差值字段缺省（CPU%/IO 速率）
+                           {'stats': {'cpu_percent': 32.9,
+                                      'mem_total_mb': 1962.0, 'mem_used_mb': 1148.2,
+                                      'disk_total_gb': 6.98, 'disk_free_gb': 1.05,
+                                      'disk_dev': 'mmcblk0', 'temp_c': 58.4,
+                                      'load1': 1.73, 'uptime_s': 81965}}])
+            for raw in f:
+                req = _json.loads(raw.decode('utf-8'))
+                cmd = req.get('cmd')
+                if cmd == 'hello':
+                    f.write((_json.dumps({'ok': True, 'challenge': 'c0'}) + '\n').encode())
+                    f.flush()
+                elif cmd == 'pair':
+                    f.write((_json.dumps({'ok': True, 'session': 's0'}) + '\n').encode())
+                    f.flush()
+                elif cmd == 'sys_stats':
+                    try:
+                        body = next(expect)
+                    except StopIteration:
+                        break
+                    f.write((_json.dumps({'ok': True, **body}) + '\n').encode())
+                    f.flush()
+                else:
+                    break
+        except OSError:
+            pass
+        finally:
+            srv_done.set()
+
+    srv = _threading.Thread(target=serve, daemon=True)
+    srv.start()
+
+    poller = SysStatsPoller('127.0.0.1', 9201, '246810',
+                            connect_fn=lambda hp, timeout: csock)
+    got: list[dict] = []
+    poller.sample.connect(got.append)
+    poller.start()
+    deadline = time.time() + 3.5
+    while len(got) < 2 and time.time() < deadline:
+        app.processEvents()          # sample 信号跨线程 queued，需事件循环放行
+        time.sleep(0.02)
+    poller.request_stop()
+    poller.wait(3000)
+    ssock.close()
+    srv_done.wait(1.0)
+    assert len(got) >= 2, f'两拍采样未到齐: {len(got)}'
+    assert got[0] == {}, f'首拍应为空（差值缺省）: {got[0]}'
+    assert got[1].get('cpu_percent') == 32.9, got[1]
+
+    # ---- 页面渲染：满键上真值，空拍回落 '--' ----
+    page = DeviceScreenPage()
+    page._on_sys_sample(got[1])
+    assert page.lbl_cpu.text() == 'CPU 33%', page.lbl_cpu.text()
+    assert page.lbl_mem.text() == '内存 1148/1962 MB', page.lbl_mem.text()
+    assert page.lbl_emmc.text() == 'eMMC 5.9/7.0 GB·mmcblk0', page.lbl_emmc.text()
+    assert page.lbl_temp.text() == '温度 58℃', page.lbl_temp.text()
+    assert page.lbl_load.text() == '负载 1.73', page.lbl_load.text()
+    assert page.lbl_up.text() == '运行 0天22:46', page.lbl_up.text()
+    page._on_sys_sample({})
+    assert page.lbl_cpu.text() == 'CPU --%' and page.lbl_emmc.text() == 'eMMC --'
+    page._stop_sys_poller()
+    print('SYS STATS PANEL OK')
+
+
 def groups():
     return [test_rx_keyword_highlight, test_log_font_zoom,
             test_break_and_line_signals, test_qol_settings, test_find_regex,
             test_status_elide, test_multi_window_broadcast,
             test_screen_gl_fit_dpr, test_close_two_stage,
             test_screen_mouse_map, test_rx_flood_coalesce,
-            test_screen_overlay_controls]
+            test_screen_overlay_controls, test_sys_stats_panel]

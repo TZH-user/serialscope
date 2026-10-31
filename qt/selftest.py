@@ -2,7 +2,17 @@
 """离屏自测：RxBuffer 纯逻辑单测 + 主窗体收发管线（QT_QPA_PLATFORM=offscreen 可跑）。"""
 from __future__ import annotations
 
+import os
 import sys
+
+# 双模式自举：直跑（cd qt && python selftest.py）时 sys.path[0] 已是 qt/；
+# 包跑（python -m qt.selftest，门禁脚本用）时 sys.path[0] 是 CWD（仓库根），
+# 兄弟模块平铺导入（selftest_* / core.* / ui.*）会 ModuleNotFoundError——
+# 统一把本文件所在目录插到最前（幂等，两种模式都兼容）。
+_QT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _QT_DIR not in sys.path:
+    sys.path.insert(0, _QT_DIR)
+
 import time
 
 
@@ -538,6 +548,180 @@ def test_fault_decode_and_ai_doc():
     assert QtWidgets.QApplication.clipboard().text() == get_ai_format_doc('FireWater')
     wave.stop_timers()
     print('FAULT/AI DOC OK')
+
+
+def _build_min_elf32(funcs) -> bytes:
+    """构造只含 .symtab/.strtab 的最小 ELF32（小端），供符号化自测。"""
+    import struct
+    strtab = b'\x00' + b'\x00'.join(n.encode() for n, _ in funcs) + b'\x00'
+    name_off, off = {}, 1
+    for n, _ in funcs:
+        name_off[n] = off
+        off += len(n.encode()) + 1
+    symtab = struct.pack('<IIIBBH', 0, 0, 0, 0, 0, 0)   # 空符号
+    for n, a in funcs:
+        symtab += struct.pack('<IIIBBH', name_off[n], a, 0x40, 0x12, 0, 1)  # STT_FUNC
+    shstrtab = b'\x00.symtab\x00.strtab\x00'
+    symtab_off = 52
+    strtab_off = symtab_off + len(symtab)
+    shstr_off = strtab_off + len(strtab)
+    shoff = shstr_off + len(shstrtab)
+    sh = struct.pack('<10I', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    sh += struct.pack('<10I', 1, 2, 0, 0, symtab_off, len(symtab), 2, 1, 4, 16)
+    sh += struct.pack('<10I', 8, 3, 0, 0, strtab_off, len(strtab), 0, 0, 1, 0)
+    sh += struct.pack('<10I', 16, 3, 0, 0, shstr_off, len(shstrtab), 0, 0, 1, 0)
+    eh = b'\x7fELF' + bytes([1, 1, 1, 0]) + b'\x00' * 8
+    eh += struct.pack('<HHIIIIIHHHHHH', 2, 40, 1, 0x08000000, 0, shoff, 0,
+                      52, 0, 0, 40, 4, 3)
+    return eh + symtab + strtab + shstrtab + sh
+
+
+def test_fault_report():
+    """!FAULT 行宽容解析 + 最小 ELF32 符号化（契约逐字节口径，纯函数）。"""
+    from core.fault_report import (ElfSymbols, decode_reasons, describe_address,
+                                   load_elf_symbols, parse_fault_line, symbolize)
+
+    # 契约整行：全部键解析、无截断、无未知键
+    line = ('!FAULT T=HardFault PC=0x08001234 LR=0x08004567 XPSR=0x01000000 '
+            'CFSR=0x00008282 HFSR=0x40000000 BFAR=0x00000000 MMFAR=0x00000000')
+    f = parse_fault_line(line)
+    assert f is not None and f.fault_type == 'HardFault'
+    assert (f.pc, f.lr, f.xpsr, f.cfsr, f.hfsr, f.bfar, f.mmfar) == (
+        0x08001234, 0x08004567, 0x01000000, 0x8282, 0x40000000, 0, 0)
+    assert not f.truncated and not f.extra
+
+    # 半行截断：短值照常解析 + truncated 标记；键在值没了也认
+    f2 = parse_fault_line('!FAULT T=BusFault PC=0x080012')
+    assert f2.pc == 0x080012 and f2.truncated and f2.cfsr is None
+    f3 = parse_fault_line('!FAULT T=HardFault PC=0x08001234 LR=')
+    assert f3.truncated and f3.lr is None
+    assert parse_fault_line('!FAULT PC=0x08001000').fault_type == '未知'
+
+    # 未知键保留展示（含非数值值）；缺 T/全零地址的宽容口径
+    f4 = parse_fault_line('!FAULT T=UsageFault PC=0x1 SHCSR=0x00007000 FOO=bar')
+    assert f4.extra.get('SHCSR') == '0x00007000' and f4.extra.get('FOO') == 'bar'
+    assert describe_address(parse_fault_line(
+        '!FAULT T=HardFault CFSR=0x00000000 HFSR=0x00000000'))[0] == '无效'
+    assert describe_address(parse_fault_line('!FAULT T=HardFault'))[0] == '未知'
+
+    # 非 !FAULT 行不误吞；行中残尾前缀可重同步
+    assert parse_fault_line('hello CFSR=0x123') is None
+    assert parse_fault_line('') is None
+    assert parse_fault_line('tail !FAULT T=MemManage CFSR=0x00000082') \
+        .fault_type == 'MemManage'
+
+    # 位域人话（口径与 fault_decode 一致）：0x8282 = MMFSR|BFSR 各两位，UFSR 半区为 0
+    reasons = decode_reasons(f)
+    assert 'MMFSR.MMARVALID 出错地址 0x00000000' in reasons
+    assert 'MMFSR.DACCVIOL 数据访问违例(MPU)' in reasons
+    assert 'BFSR.PRECISERR 精确数据总线错误' in reasons
+    assert 'BFSR.BFARVALID 出错地址 0x00000000' in reasons
+    assert 'HFSR.FORCED 强制升级为HardFault(具体原因查CFSR)' in reasons
+    assert decode_reasons(parse_fault_line(
+        '!FAULT T=HardFault CFSR=0x00020000')) == [
+        'UFSR.INVSTATE 状态无效(常见:函数指针错误/Thumb位)']
+    assert decode_reasons(parse_fault_line(
+        '!FAULT T=HardFault CFSR=0x00000000')) == ['CFSR/HFSR 各错误位均未置位']
+
+    # 符号化：最近符号+偏移（servo_ctrl+0x1c 契约示例）、裸地址回落
+    syms = ElfSymbols.from_bytes(_build_min_elf32(
+        [('HardFault_Handler', 0x08001200), ('main', 0x08000100),
+         ('servo_ctrl', 0x08001218)]))
+    assert symbolize(syms, 0x08001234) == 'servo_ctrl+0x1c'
+    assert symbolize(syms, 0x08001200) == 'HardFault_Handler'
+    assert symbolize(syms, 0x08000105) == 'main+0x5'
+    assert symbolize(syms, 0x10) == '0x00000010'       # 低于最小符号
+    assert symbolize(None, 0x08001234) == '0x08001234'  # 未加载 ELF
+
+    # 文件加载缓存：正常加载 / 坏数据报错 / 空路径
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix='.elf')
+    try:
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(_build_min_elf32([('main', 0x08000100)]))
+        got, err = load_elf_symbols(tmp)
+        assert got is not None and not err and symbolize(got, 0x08000104) == 'main+0x4'
+        with open(tmp, 'wb') as fh:
+            fh.write(b'nope')
+        got2, err2 = load_elf_symbols(tmp)
+        assert got2 is None and err2
+    finally:
+        os.remove(tmp)
+    assert load_elf_symbols('') == (None, '')
+    print('FAULT REPORT OK')
+
+
+def test_fault_panel():
+    """故障诊断面板：树形详情/历史切换/主窗体 ingest 钩子/状态栏徽标。"""
+    from PySide6 import QtWidgets
+
+    from core.settings import read_setting, write_setting
+    from ui.fault_panel import FaultPanel
+    from ui.main_window import MainWindow
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    saved_elf = read_setting('fault/elf_path', '')
+    try:
+        panel = FaultPanel()
+        line = ('!FAULT T=HardFault PC=0x08001234 LR=0x08004567 XPSR=0x01000000 '
+                'CFSR=0x00008282 HFSR=0x40000000 BFAR=0x00000000 MMFAR=0x00000000')
+        info = panel.record_line(line)
+        assert info is not None and panel.history() == [info]
+        titles = [panel.tree.topLevelItem(i).text(0)
+                  for i in range(panel.tree.topLevelItemCount())]
+        assert titles == ['故障地址', '故障函数', '硬故障', '总线故障',
+                          '内存管理故障', '用法故障'], titles
+        assert panel.tree.topLevelItem(0).text(1) == '0x00000000'
+
+        def find(group, name=None):
+            for i in range(panel.tree.topLevelItemCount()):
+                top = panel.tree.topLevelItem(i)
+                if top.text(0) == group:
+                    if name is None:
+                        return top
+                    for j in range(top.childCount()):
+                        c = top.child(j)
+                        if c.text(0) == name:
+                            return c
+            return None
+        # 置位醒目（加粗+status_err 前景），未置位灰显
+        assert find('总线故障', 'PRECISERR').font(0).bold()
+        assert not find('总线故障', 'IBUSERR').font(0).bold()
+        assert find('总线故障', 'BFARVALID').text(1) == '置位 0x00000000'
+        # 半行：组值=缺失；未知键 →「其他字段」顶层组
+        panel.record_line('!FAULT T=BusFault PC=0x080012')
+        assert find('总线故障').text(1) == '缺失'
+        panel.record_line('!FAULT T=UsageFault PC=0x1 SHCSR=0x00007000')
+        titles = [panel.tree.topLevelItem(i).text(0)
+                  for i in range(panel.tree.topLevelItemCount())]
+        assert '其他字段' in titles
+        assert len(panel.history()) == 3 and panel.list_hist.count() == 3
+        panel.list_hist.setCurrentRow(0)   # 历史切换回半行记录
+        assert find('总线故障').text(1) == '缺失'
+        panel.clear_all()
+        assert panel.tree.topLevelItemCount() == 1 and panel.list_hist.count() == 0
+
+        # 主窗体 ingest 钩子：RX 命中 → 面板记录 + 徽标点亮 + 旧解码不受影响
+        win = MainWindow()
+        win.show()
+        win.wave.state.enabled = False
+        win.combo_rx_format.setCurrentText('ASCII')
+        win._port_watch_timer.stop()
+        win.ingest_bytes(line.encode() + b'\n')
+        assert len(win.fault.history()) == 1
+        assert win.btn_fault_badge.isVisibleTo(win)
+        assert 'HardFault' in win.btn_fault_badge.text()
+        win.ingest_bytes(b'plain line\n')          # 非故障行不误报
+        assert len(win.fault.history()) == 1
+        sys_texts = ' '.join(e['text'] for e in win.message_entries
+                             if e['direction'] == 'SYS')
+        assert 'HardFault 解码' in sys_texts       # fault_decode 钩子保持
+        win._port_watch_timer.stop()
+        win.close()
+    finally:
+        write_setting('fault/elf_path', saved_elf)
+    print('FAULT PANEL OK')
 
 
 def test_wave_presets():
@@ -2761,7 +2945,7 @@ sys.exit(0)
     try:
         app.processEvents()
         titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', 'Linux 支持', '设置', '关于'], \
+        assert titles == ['终端', '波形', '频谱', 'Modbus', 'STM32', '故障诊断', 'Linux 支持', '设置', '关于'], \
             str(titles)
         panel = win.stm32
         assert panel.runner.cli_path == fake_bat, panel.runner.cli_path
@@ -2919,7 +3103,7 @@ def test_main_tabs_integration():
     try:
         app.processEvents()
         texts = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', 'Linux 支持', '设置', '关于'], \
+        assert texts == ['终端', '波形', '频谱', 'Modbus', 'STM32', '故障诊断', 'Linux 支持', '设置', '关于'], \
             str(texts)
         for i, name in enumerate(texts):   # 逐页签切换 + 渲染非空
             win.tabs.setCurrentIndex(i)
@@ -3367,6 +3551,8 @@ def run_selftest(frozen: bool = False, only: str | None = None) -> int:
         test_auto_log_export,
         test_log_hover,
         test_fault_decode_and_ai_doc,
+        test_fault_report,
+        test_fault_panel,
         test_wave_presets,
         test_xy_view,
         test_session_record,

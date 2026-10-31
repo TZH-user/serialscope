@@ -11,7 +11,13 @@
 
 - **跑表开关与透明度（用户实报常开影响看画面）**：页上「跑表」复选框 + 透明度 10%~100%，改动落盘且发流中自动重起流生效（真机 pid 更替验证）；板端 video_start 受理 overlay/overlay_opacity，STOPWATCH_VF 参数化（fontcolor 与底框同比例淡化）。
 
+- **HardFault 定位（P0：板端真故障自捕获 + PC 树形诊断面板）**：固件 V4.3.0（实验区 serial_port）HardFault/MemManage/BusFault/UsageFault 四路收口——汇编跳板判 EXC_RETURN 选 MSP/PSP 取压栈帧，C 侧收 CFSR/HFSR/BFAR/MMFAR，按契约打一行 `!FAULT T=… PC=… LR=… XPSR=… CFSR=… HFSR=… BFAR=… MMFAR=…` 后自动复位（文本行复用行式 ingest 天然可重同步——B-01 二进制帧 CRC 撞 0x0A 的教训不再犯）；新增 FAULTTEST 命令触发确定性故障供联调；dump 路径零 malloc/无浮点/fault-in-fault 二次直接 lockup。PC 侧新增「故障诊断」页：宽容解析（半行/未知键/截断值）、CFSR/HFSR 位域人话树（样式基准 STM32Cube 故障寄存器树：故障地址/故障函数/硬故障/总线故障/内存管理故障/用法故障，置位醒目未置位灰显）、手写最小 ELF32 符号化（.symtab 查表 PC→函数+偏移，零第三方依赖，ELF 路径为面板设置项且按 mtime 缓存）、状态栏「⚠ 最近一次异常」徽标不弹窗不刷屏。自测 +2 组（fault_report 解析/符号化 + fault_panel 树渲染）。
+
+- **Linux 页系统状态 1Hz（CPU/内存/eMMC/温度/负载/运行时长）**：板端 server_rk 新增 sys_stats 采样（纯读 /proc 与 /sys 零外部依赖；CPU% 与 eMMC I/O 速率按上次采样差值，首拍缺省）+ 控制面 sys_stats 命令；页上「系统状态」开关 + 底部状态行（SysStatsPoller 独立 1Hz 小连接，不看画面也能看板况；断线 3s 退避重连；缺键渲染 '--' 不猜值）；真机 1.1s 双采样验证（cpu 32.9%、mmcblk0 5.93/7.31 GB、58.4℃）。server-rk 单测 17/17。
+
 ### 修复
+- **自测套件 40 分钟化 + 退出码 127（同根因：主题重复抛光风暴）**：MainWindow.__init__ 每次 apply_saved_theme → setStyleSheet 令 Qt 全量重抛光 app 内所有控件，测试套件窗口越建越多成本 O(窗数²)（实测 40 窗探针 >180s 未完、全量 ~40min；WER 实录 shutdown 阶段 ucrtbase fast-fail 0xC0000409，git-bash 映射成退出码 127——独立自测门禁因此持续误报"失败"并诱发误判"close_two_stage 竞态"，py-spy 定位真凶在 set_theme）。两层收口：①set_theme 内容不变即跳过 setStyleSheet（app.property 记已应用 QSS），40 窗探针 19.6s、全量回分钟级；②残留的间歇性 teardown abort（71 组全绿之后才发生，不影响判定）经 `_verify/selftest_gate.py` 用 os._exit 跳过解释器关机，门禁退出码=真实判定。
+
 - **关闭按钮灰色"未响应"（Windows 幽灵窗根因）**：垃圾洪泛（错波特率/调试口乱码，150KB/s 下约 600 行/s）逐事件整行处理把 GUI 线程钉死在 posted events 里——5s 泵不到原生消息 Windows 即幽灵化（标题栏 X 变灰，点什么都没响应）。RX 入口改洪泛合并：pending 缓冲 + 16KB/拍预算消费（任意相邻消费间必回事件循环泵原生消息），超高水位丢最老并限频打标（统计行「洪泛丢弃 N」），小数据量当场消费语义不变。自测 +3 组（坐标换算/洪泛合并/跑表控件）。
 
 - **关闭按钮"失效"（关窗最长 ~14s 无响应）**：closeEvent 原本把全部收尾内联在 GUI 线程——worker 1.5s + 控制通道 6s + 收流/解码线程 3s×2 + STM32 CLI 1s 串行等完，USB 串口假死时 pyserial close 还会在内核再卡（用户报点 X 无反应）。改两段式：closeEvent 只做轻量收尾并立即隐藏窗口（用户感知瞬时关闭），重活挪 singleShot(0) 的 _finalize_close（try/finally 保证异常也照常退出；最后一个窗口由它负责 app.quit，quitOnLastWindowClosed 暂关防 video_stop 发不出去）；_teardown_worker 对收不回的串口线程（卡死内核调用）改入"停尸房"只扣引用不销毁，避免带运行线程 deleteLater 的崩溃隐患。自测 +2 组（两段式关窗/视频视口 DPR）

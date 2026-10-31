@@ -186,6 +186,12 @@ QComboBox QAbstractItemView {{ background: {p['control']}; color: {p['text']};
                               selection-background-color: {p['accent']}; }}
 QPlainTextEdit, QTextEdit {{ background: {p['log_bg']}; color: {p['log_text']};
                             border: 1px solid {p['log_border']}; border-radius: 4px; }}
+/* 条目视图交替行：palette 默认 alternateBase 是浅主题遗留色（近白），深色主题下
+   亮字+近白底会整行不可见（layout_audit 实测）——统一按色板给交替行底色 */
+QTreeWidget, QListWidget, QTableWidget {{
+    background: {p['window']}; color: {p['text']};
+    alternate-background-color: {p['control']};
+    selection-background-color: {p['accent']}; }}
 {mono_rule}
 QPushButton {{ background: {p['accent']}; color: white; border: none;
               border-radius: 4px; padding: 6px 14px; }}
@@ -195,6 +201,11 @@ QPushButton:disabled {{ background: {p['btn_disabled_bg']}; }}
 QPushButton#tool {{ background: {p['tool_btn']}; padding: 3px 10px; }}
 QPushButton#tool:hover {{ background: {p['tool_btn_hover']}; }}
 QPushButton#tool:checked {{ background: {p['accent']}; color: white; }}
+/* 故障徽标：点亮后常驻状态行右侧（错误红描边，点击跳故障诊断页） */
+QPushButton#fault_badge {{ background: {p['panel']}; color: {p['status_err']};
+                          border: 1px solid {p['status_err']}; border-radius: 4px;
+                          padding: 3px 10px; font-weight: bold; }}
+QPushButton#fault_badge:hover {{ background: {p['control']}; }}
 /* #tool 是 ID 选择器，优先级压过上面的 :disabled，必须显式补禁用态底色 */
 QPushButton#tool:disabled {{ background: {p['btn_disabled_bg']}; }}
 QTabWidget::pane {{ border: 1px solid {p['log_border']}; }}
@@ -437,7 +448,13 @@ def set_theme(name: str, app: QtWidgets.QApplication | None = None) -> None:
     pg.setConfigOptions(background=p['plot_bg'], foreground=p['plot_fg'])
     app = app or QtWidgets.QApplication.instance()
     if app is not None:
-        app.setStyleSheet(_build_qss(p))
+        # 同一 QSS 重复 setStyleSheet 会让 Qt 全量重抛光 app 内所有控件——
+        # 每个 MainWindow.__init__ 都走这里，测试/多窗场景下成本 O(窗数²)
+        # （实测 40 窗探针 >180s）。内容没变就跳过，真换主题时 QSS 必然不同。
+        qss = _build_qss(p)
+        if app.property('liuscope_applied_qss') != qss:
+            app.setStyleSheet(qss)
+            app.setProperty('liuscope_applied_qss', qss)
     for fn in list(_listeners):
         fn(name)
 

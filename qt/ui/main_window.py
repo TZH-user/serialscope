@@ -35,6 +35,7 @@ from core.session_record import SessionRecorder, load_replay_chunks
 from core.settings import read_setting, write_setting
 from core.update_check import RELEASES_PAGE, check_app_update
 from ui.backtrace_dialog import BacktraceDialog
+from ui.fault_panel import FaultPanel
 from ui.find_bar import FindBar
 from ui.history_edit import HistoryLineEdit
 from ui.log_hover import LogHoverTip
@@ -243,6 +244,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_status.setObjectName('status_err')
         self.lbl_stats = QtWidgets.QLabel('RX 0.0 KiB | TX 0.0 KiB')
         self.lbl_stats.setObjectName('backlog')
+        # 故障徽标：固件打出 !FAULT 行时点亮（不弹窗不刷屏），点击跳故障诊断页
+        self.btn_fault_badge = QtWidgets.QPushButton('⚠ 最近一次异常')
+        self.btn_fault_badge.setObjectName('fault_badge')
+        self.btn_fault_badge.setToolTip('固件打出了 !FAULT 异常行——点击查看寄存器位域详情')
+        self.btn_fault_badge.clicked.connect(
+            lambda: self.tabs.setCurrentWidget(self.fault))
+        self.btn_fault_badge.hide()
+        # 小宽度上限：正常文本（类型+时刻）够用；极端长文本被裁但 tooltip 有全文，
+        # 不至于把同行的连接状态（ElidedLabel）与串口选择器挤没（layout_audit 实测）
+        self.btn_fault_badge.setMaximumWidth(240)
 
         top = QtWidgets.QHBoxLayout()
         top.addWidget(QtWidgets.QLabel('串口'))
@@ -255,6 +266,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.btn_new_window)
         top.addWidget(self.lbl_status, 2)
         top.addWidget(self.lbl_stats, 1)
+        top.addWidget(self.btn_fault_badge)
 
         # ---- 日志区 + 查找条 + 记录操作行 ----
         # QTextEdit 的 QTextDocument 在 append+裁剪循环下碎片内存不归还（实测 ~1.2KB/行
@@ -440,6 +452,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.modbus.log_fn = self._append_log
         self.stm32 = Stm32Panel()
         self.stm32.log_fn = self._append_log
+        self.fault = FaultPanel()   # 故障诊断页：ingest 在 _append_log RX 分支喂数
         self.device_screen = DeviceScreenPage()   # v2 M2：设备屏（UDP H.264 投屏，只读）
         self.settings_page = SettingsPage(self.wave)
         self.settings_page.chk_on_top.toggled.connect(self._apply_on_top)
@@ -454,6 +467,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self.spectrum, '频谱')
         self.tabs.addTab(self.modbus, 'Modbus')
         self.tabs.addTab(self.stm32, 'STM32')
+        self.tabs.addTab(self.fault, '故障诊断')
         self.tabs.addTab(self.device_screen, 'Linux 支持')
         self.tabs.addTab(self.settings_page, '设置')
         self.tabs.addTab(self.about_page, '关于')
@@ -1248,6 +1262,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_status.style().unpolish(self.lbl_status)
         self.lbl_status.style().polish(self.lbl_status)
 
+    def _note_fault(self, info):
+        """!FAULT 行到达：点亮状态栏徽标（带类型+时刻），不弹窗不刷屏。"""
+        stamp = datetime.datetime.now().strftime('%H:%M:%S')
+        text = f'⚠ {info.fault_type} {stamp}'
+        self.btn_fault_badge.setText(text)
+        self.btn_fault_badge.setToolTip(text + '\n点击切换到「故障诊断」页查看寄存器位域详情')
+        self.btn_fault_badge.show()
+
     def closeEvent(self, event):  # noqa: N802 (Qt 命名)
         """关窗两段式：窗口立即消失，线程/进程收尾异步进行。
 
@@ -1562,6 +1584,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if direction != 'SYS' and self.chk_auto_save.isChecked():
             self._auto_log.enqueue(format_entry_block(now, direction, text))
         if direction == 'RX':
+            fault_info = self.fault.record_line(text)   # !FAULT 行 → 故障诊断页记录
+            if fault_info is not None:
+                self._note_fault(fault_info)            # 状态栏徽标点亮（不弹窗不刷屏）
             decoded = test_fault_dump_line(text)
             if decoded:
                 self._append_log('SYS', f'HardFault 解码: {decoded}')
